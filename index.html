@@ -4,75 +4,181 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="How Strata serves Qwen 27B and Flash-Next on two local GPUs and switches them to image and video generation.">
-  <title>Fast local Qwen and media generation on an RTX 5090 and DGX Spark · Strata</title>
+  <title>What makes a local agent fast enough to use? · Strata</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <a class="skip-link" href="#article">Skip to article</a>
   <header class="masthead">
-    <div class="masthead-inner"><span class="wordmark">Strata</span><span class="series">Engineering notes</span></div>
+    <div class="masthead-inner">
+      <span class="wordmark">Strata</span>
+      <a class="series" href="https://macoredroid.github.io/collective-intelligence/">Collective Intelligence companion</a>
+    </div>
   </header>
   <main id="article">
     <article>
       <header class="hero">
-        <div class="eyebrow">Local inference</div>
-        <h1>Fast local Qwen and media generation on an RTX&nbsp;5090 and DGX&nbsp;Spark</h1>
-        <p class="deck">Two GPUs, two chat models, and one conversation that can request images or video.</p>
+        <div class="eyebrow">Field notes · Local inference</div>
+        <h1>What makes a local agent fast enough to use?</h1>
+        <p class="deck">An RTX 5090, a DGX Spark, and the difference between a faster model and a faster turn.</p>
+        <nav aria-label="In this article" class="jump-links">
+          <a href="#what-strata-owns">Architecture</a>
+          <a href="#what-the-experiments-changed">Results</a>
+          <a href="#try-the-serving-profiles-on-your-hardware">Run it locally</a>
+        </nav>
       </header>
       <div class="article-body">
-<p>We use two GPUs to run local models from one OpenCode workspace. An
-RTX 5090 serves Qwen3.8-27B and switches to image generation when
-needed. A DGX Spark serves the larger Qwen3.8-Flash-Next with a
-262,144-token context and switches to video generation. A chat can call
-the other machine’s media model, receive the finished asset, and keep
-its conversation intact.</p>
-<p>These machines solve different problems. The 5090 is the fast
-interactive model. Spark gives us room for a much larger checkpoint and
-long prompts. When either machine needs its GPU for media, we swap the
-serving process and keep the application session.</p>
-<h2 id="making-the-27b-model-fast-on-one-5090">Making the 27B model fast
-on one 5090</h2>
-<p>Our target is the community abliterated Huihui Qwen3.8-27B in Q4_K_M
-GGUF, served by tqLLM 1.4.4. Abliteration is a modification to the model
-weights intended to reduce refusal behavior. The server holds the
-conversation’s attention keys and values in an 8-bit KV cache and
-exposes a 204,800-token context.</p>
-<p>The largest decode gain came from DFlash2. A small TQ3 drafter
-proposes a block of tokens in parallel. We cap it at seven proposals per
-verification pass and use a 65,536-entry draft vocabulary. The 27B
-target checks the proposed tokens and commits the verified prefix. When
-the draft gets several tokens right, the target can advance the
-conversation by several tokens per verification pass. The target
-checkpoint still decides what to emit. <a
+<p>The largest speedup in Strata changed how long we waited for a reply
+to <strong>start</strong>. On Spark, two follow-ups that shared almost
+16,000 tokens went from <strong>8.21 seconds to 0.23 seconds</strong> to
+first token when we made prefix reuse work. The same patch barely moved
+decode speed. On the 5090, DFlash2 did almost the reverse. It raised
+median decode from <strong>82 to 292 tokens per second</strong> in two
+matched coding probes while cold prompt processing still took
+seconds.</p>
+<p>That difference matters because the unit of work is a turn in an
+ongoing conversation. A turn can reopen a large repository context, run
+a tool, or ask another machine to render an asset. A faster decoder only
+shortens part of that path.</p>
+<p>This is a systems companion to my Collective Intelligence series. In
+<a
+href="https://macoredroid.github.io/collective-intelligence/part-8/">One
+Harness, Six Ways to Work</a>, I held the harness fixed and looked at
+how different models coordinated. Here I held the checkpoints fixed
+within each comparison and looked at where the harness spent time, what
+state it preserved, and what happened when a GPU changed jobs.</p>
+<h2 id="what-strata-owns">What Strata owns</h2>
+<p>Strata is my local workspace for model serving, conversations, and
+media jobs. OpenCode owns the conversation and tool loop. The inference
+process owns the transient model state, including attention caches. A
+separate controller owns GPU mode changes and the media job record. On
+mobile I can resume a conversation on its owning host, follow tool
+activity, and download the returned attachment.</p>
+<p>The split grew out of a practical constraint. The same GPU that
+answers a chat might be needed to render the next artifact. If the
+conversation lived only inside the inference process, freeing GPU memory
+would also break the user's flow. Keeping messages and tool results in
+the harness lets the next request rebuild the context after the model
+comes back. The same separation lets us replace a serving engine without
+migrating conversation history.</p>
+<p><strong>Strata</strong> here names the workspace. We also tried the
+upstream <a href="https://github.com/Niko1221/Strata">Strata inference
+engine</a> in earlier runs. Both of the chat profiles described below
+use <a href="https://tqllm.com/releases">tqLLM 1.4.4</a>. The measured
+speedups belong to specific checkpoint, engine, and drafter
+combinations.</p>
+<figure class="switching">
+  <div class="origin">OpenCode media request</div>
+  <div class="routes">
+    <div><strong>RTX 5090</strong><span>Switch chat to Qwen Image</span></div>
+    <div><strong>DGX Spark</strong><span>Switch chat to MiniMax H3</span></div>
+  </div>
+  <figcaption>Wait for idle chat → render and save → restore the prior model → return the attachment.</figcaption>
+</figure>
+
+<h2 id="two-gpus-two-inference-paths">Two GPUs, two inference paths</h2>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Article table"><table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>RTX 5090</th>
+<th>DGX Spark</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Target</td>
+<td>Huihui Qwen3.8-27B abliterated UD-DW Q4_K_M</td>
+<td>Huihui Qwen3.8-Flash-Next abliterated v2, Swift IQ3_S</td>
+</tr>
+<tr>
+<td>Drafting</td>
+<td>TQ3 DFlash2, seven proposals, 65,536-token draft vocabulary</td>
+<td>IQ4 native MTP, adaptive drafts up to seven</td>
+</tr>
+<tr>
+<td>Context</td>
+<td>204,800 tokens with Q8 KV</td>
+<td>262,144 tokens with one slot</td>
+</tr>
+<tr>
+<td>Media role</td>
+<td>Qwen Image 2.1 Turbo</td>
+<td>MiniMax H3 through ComfyUI</td>
+</tr>
+</tbody>
+</table></div>
+<p>Abliterated checkpoints are community derivatives with weight changes
+intended to reduce refusal behavior. Quantization choices belong to the
+serving profile too. For example, the 5090 uses an 8-bit cache for the
+attention keys and values so that the 27B weights, draft model, and long
+context can fit together. We measured the effect of adding the drafter
+with the target GGUF and KV format held fixed.</p>
+<p>On the <strong>5090</strong>, a small block diffusion model proposes
+several tokens in one pass. The 27B target verifies the proposed block
+and advances by the accepted prefix. A smaller draft vocabulary cuts the
+drafter's work, while verification uses the target's own scores. This
+makes output speed depend on how many proposals the target accepts and
+how much each round costs. <a
 href="https://arxiv.org/abs/2602.06036">DFlash paper</a> · <a
-href="https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2">DFlash2 model
-card</a></p>
-<p>In a controlled test on the same 5090, we held the target weights, Q8
-KV cache, and 40,960-token configured context fixed. Across two greedy
-coding prompts capped at 512 output tokens, median decode rose from
-<strong>82.3 to 292.5 tokens per second</strong> with DFlash2. Both
-output pairs matched byte for byte. On the separate 204,800-token
-serving profile, one 2,048-token coding run reached <strong>274.4
-tok/s</strong> and one reasoning run reached <strong>310.5
-tok/s</strong>. The reasoning run used a 1,024-token thinking
-budget.</p>
-<p>Decode speed describes what happens after the model starts writing.
-On that same serving profile, a cold 33.5K-token prompt still took
-<strong>12.9 seconds</strong> to reach the first token. For an agent
-that repeatedly reads large codebases, processing the input can dominate
-the time the user waits.</p>
-<h2 id="giving-the-larger-model-a-long-context-on-spark">Giving the
-larger model a long context on Spark</h2>
-<p>Spark runs the Swift-derived, community abliterated Huihui
-Qwen3.8-Flash-Next IQ3_S checkpoint. Its unified memory holds all 512
-experts per layer resident for decode. The model routes each token to a
-subset of those experts. Native multi-token prediction proposes future
-tokens, and the target verifies them. This deployment uses the
-Flash-Next IQ4 MTP drafter. <a href="https://tqllm.com/models">tqLLM
-model and format support</a> · <a
+href="https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2">DFlash2
+checkpoint</a></p>
+<p>On <strong>Spark</strong>, Flash-Next routes each token to a subset
+of its experts. Unified memory lets this profile keep all 512 experts
+per layer resident for decode, so choosing a different expert does not
+require moving its weights in from a host cache. The native multi-token
+prediction head supplies drafts. Its confidence cutoff controls how long
+the engine keeps proposing tokens before the target verifies them. The
+launch manifest ties together two target shards, the MTP weights, a
+tokenizer, and the draft vocabulary. <a
 href="https://huggingface.co/YTan2000/Qwen3.8-Flash-Next-tqLLM">Flash-Next
-MTP assets</a></p>
-<table>
+serving assets</a></p>
+<h2 id="what-the-experiments-changed">What the experiments changed</h2>
+<p><strong>1. Drafting is a large lever when acceptance and verification
+cost line up.</strong> In two greedy coding probes capped at 512 output
+tokens, the 5090 went from <strong>82.3 to 292.5 tok/s</strong> with
+DFlash2. The target, Q8 KV, and 40,960-token configured context were
+fixed. Both output pairs matched exactly. The separately configured
+204,800-token profile reached <strong>274.4 tok/s</strong> on one capped
+coding run and <strong>310.5 tok/s</strong> on one reasoning run. A cold
+33.5K prompt on that profile still took <strong>12.9 s</strong> before
+the first token.</p>
+<p><strong>2. A cache setting needs a counter.</strong> Stock tqLLM
+1.4.4 accepted the prompt-cache option on Spark, but its Flash-Next
+engine required more than one slot before reusing prompt state. The two
+stock follow-ups reused zero tokens. In a combined patch trial, Spark
+reused about <strong>99.5%</strong> of each 16K prefix. Median
+first-token latency fell from <strong>8.21 s to 0.23 s</strong>. The
+identical cold prompt went from <strong>8.22 s to 8.81 s</strong>. The
+fast path depends on an actual shared prefix and a retained snapshot.
+After a model switch or restart, the first turn has to populate the
+cache again. <a
+href="https://github.com/turbo-tan/tqllm/blob/v1.4.4/src/models/qwen/qwen4exp/fn_engine.hpp#L68-L75">tqLLM
+1.4.4 cache implementation</a></p>
+<p><strong>3. Greedy output is a numerical test.</strong> The combined
+patch initially changed four of six long greedy outputs. When we
+isolated the changes, the CUDA graph fix matched stock on both
+1,536-token samples. The cache change alone diverged at tokens
+<strong>38</strong> and <strong>27</strong> with zero cache hits. The
+second split occurred below the sparse-attention threshold. Creating the
+snapshot adds a prefill chunk boundary, which can change floating-point
+rounding. A close token choice can then flip, and the next prediction
+sees a different history. We measured the first divergent token, while
+the score margin between the two choices remains unknown. This is why we
+check task outcomes on actual follow-up turns as well as exact token
+matches on controlled runs.</p>
+<p><strong>4. Draft tuning helped on Spark, but the gain was
+smaller.</strong> With the cache and graph patches disabled, moving the
+MTP confidence cutoff from 0.90 to 0.80 moved <strong>68.3 → 71.5
+tok/s</strong> on one short prompt and <strong>65.6 → 66.6
+tok/s</strong> on one 15.6K prompt. Both holdout outputs matched stock
+across all 1,536 tokens. The larger published <strong>122 tok/s</strong>
+result uses tqLLM's own mixed-quantization checkpoint. That gives us a
+lead for a different profile, while the numbers above isolate a setting
+on our existing abliterated weights. <a
+href="https://tqllm.com/releases">tqLLM 1.4.2 release
+measurements</a></p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Article table"><table>
 <thead>
 <tr>
 <th>Serving profile</th>
@@ -83,83 +189,115 @@ MTP assets</a></p>
 </thead>
 <tbody>
 <tr>
-<td>RTX 5090 · Qwen3.8-27B · 204,800 context</td>
+<td>5090, 204,800-token configuration</td>
 <td style="text-align: right;">274.4 tok/s</td>
 <td style="text-align: right;">310.5 tok/s</td>
 <td style="text-align: right;">12.9 s</td>
 </tr>
 <tr>
-<td>DGX Spark · Qwen3.8-Flash-Next · 262,144 context</td>
+<td>Spark, 262,144-token configuration</td>
 <td style="text-align: right;">66.5 tok/s</td>
 <td style="text-align: right;">59.9 tok/s</td>
 <td style="text-align: right;">17.8 s</td>
 </tr>
 </tbody>
-</table>
-<p>These are one-stream serving probes. Each decode cell is one capped
-2,048-token run. Both machines also returned the expected key from a
-100,313-token prompt.</p>
-<p>Spark exposed a second source of latency. Our server configuration
-enabled prefix caching, but tqLLM v1.4.4 gated it on having more than
-one slot. Our single slot therefore recomputed a shared 16K-token prompt
-prefix on each follow-up. In an isolated build, we enabled single-slot
-reuse and moved a sparse-attention scratch allocation outside CUDA graph
-capture. Follow-ups went from <strong>8.21 seconds to 0.23
-seconds</strong> to the first token, reusing about 99.5% of the prompt.
-Sustained decode changed by about 2% or less. Four of six sustained
-greedy outputs differed across builds, and we returned the live server
-to stock. In a follow-up test on two prompts, the graph change alone
-matched stock across both 1,536-token outputs. The cache change alone
-diverged with zero reused tokens, pointing to the prefill pass that
-creates the cache snapshot. Changing the size of a prefill chunk can
-change floating-point rounding. If that flips the highest-scoring token,
-the model’s subsequent input changes. <a
-href="https://github.com/turbo-tan/tqllm/blob/v1.4.4/src/models/qwen/qwen4exp/fn_engine.hpp">tqLLM
-v1.4.4 cache implementation</a></p>
-<h2 id="switching-from-chat-to-image-or-video">Switching from chat to
-image or video</h2>
-<p>OpenCode exposes image and video tools over MCP. An image request
-goes to the 5090, which runs Qwen Image 2.1 Turbo. A video request goes
-to Spark, which runs MiniMax H3 through ComfyUI. The calling chat can be
-on either machine.</p>
-<figure class="switching">
-  <div class="origin">OpenCode media request</div>
-  <div class="routes">
-    <div><strong>RTX 5090</strong><span>Switch chat to Qwen Image</span></div>
-    <div><strong>DGX Spark</strong><span>Switch chat to MiniMax H3</span></div>
-  </div>
-  <figcaption>Wait for idle chat → render and save → restore the prior model → return the attachment.</figcaption>
-</figure>
-
-<p>The controller checks that chat is idle before unloading it and takes
-a host-level lock during the switch. It records the previous mode, waits
-for the media engine to become ready, and saves the finished artifact
-before restoring the previous model. When rendering fails, it attempts
-to restore the previous mode and records whether restoration succeeded.
-Conversation history stays in OpenCode, so loading a model again does
-not erase the conversation. The GPU is occupied during rendering, and
-loading chat again adds a cold-start delay.</p>
-<p>In an end-to-end smoke test, a Spark chat sent a 512×512 image
-request to the 5090 and received a PNG of a red origami fox. A 5090 chat
-sent a two-second video request to Spark and received an MP4 of a yellow
-paper boat. Both attachments downloaded successfully, and both chat
-servers answered a fresh inference request after restoration. These
-tests exercised the switching and delivery path at small
-resolutions.</p>
-<p>The delivery presets separate what the models generate from what the
-user receives. A square image renders at 2,048×2,048 and can be resized
-to a 4,096-pixel edge. The high video preset renders at 1,920×1,088,
-crops to 1,920×1,080, and upscales to 3,840×2,160. Longer videos are
-assembled from clips sized to fit Spark’s memory.</p>
-<h2 id="what-we-measure-before-changing-a-serving-profile">What we
-measure before changing a serving profile</h2>
-<p>We treat prompt processing, decode, and model switching as separate
-measurements. A draft model can speed up generation while leaving cold
-prompt latency unchanged. Prefix reuse can remove seconds from a
-follow-up with little effect on tokens per second. And a media job is
-only useful in the conversation once the attachment can be read and the
-chat service can answer again. Measuring each part tells us which change
-will make the next interaction faster.</p>
+</table></div>
+<p>Each decode cell is a single 2,048-token capped run. The reasoning
+probes used a 1,024-token thinking budget. Both models also returned the
+expected key from a 100,313-token input. A configured context limit
+describes the serving envelope, while the retrieval probe checks one
+concrete behavior within it.</p>
+<h2 id="switching-a-gpu-without-losing-the-conversation">Switching a GPU
+without losing the conversation</h2>
+<p>A media tool submits a job to the host that owns the corresponding
+model. The controller waits for idle chat, records the previous mode,
+and takes a host lock before unloading the model. It checks that the new
+engine is ready, renders and saves the output, then restores the
+previous model. The job records errors and whether restoration
+succeeded. User intent to stop a model survives this cleanup.</p>
+<p>I tested this with a Spark chat requesting a 512×512 origami fox from
+the 5090, and a 5090 chat requesting a two-second paper boat clip from
+Spark. Both attachments downloaded and both restored chat engines
+answered a fresh request. Those small renders exercised routing,
+switching, saving, and resuming the conversation. The production
+delivery presets render a square image at 2,048 pixels and upscale it to
+4,096, or render video at 1,920×1,088, crop to 1,920×1,080, and upscale
+to 3,840×2,160. Longer videos use clips sized to fit available
+memory.</p>
+<p>For a one-machine version, put both modes behind the same controller.
+Keep the messages and job record on disk, serialize GPU ownership, and
+give each transition a readiness check and a timeout. Test failure
+during model startup as well as a successful render. Measure the time
+until chat can answer again, since that is part of the cost of sharing a
+GPU.</p>
+<h2 id="try-the-serving-profiles-on-your-hardware">Try the serving
+profiles on your hardware</h2>
+<p>Start with the text server on one machine. The recipes use Linux,
+Docker, NVIDIA drivers with container GPU access, and the public tqLLM
+1.4.4 image. Use an RTX 5090-class 32 GB GPU for the 27B settings below,
+or a 128 GB GB10 Spark for the Flash-Next settings. Set aside roughly
+<strong>20 GB</strong> or <strong>90 GB</strong> of SSD space
+respectively for the pinned model assets, plus room for the container
+image. Check GPU access before downloading. Spark's script uses CDI, and
+the 5090 script uses Docker's NVIDIA runtime. <a
+href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html">NVIDIA
+container setup</a> · <a href="https://tqllm.com/install">tqLLM
+installation</a></p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> clone https://github.com/MaCoredroid/strata-local-inference.git</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> strata-local-inference</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Choose one profile on its own host.</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="fu">bash</span> recipes/serve.sh 5090</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Or, on a 128 GB GB10:</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="fu">bash</span> recipes/serve.sh spark</span></code></pre></div>
+<p>The <a href="recipes/serve.sh">serving script</a> pins each public
+asset to a revision and verifies its SHA-256 before launch. It writes
+the Spark manifest and binds the API to loopback. Set
+<code>STRATA_MODEL_DIR</code> to an SSD directory, add
+<code>--download-only</code> to stage weights without starting a GPU
+process, and set <code>STRATA_PORT</code> if 8144 is in use. If the
+profile does not fit your card, start with a model or context that fits
+and record that as a separate configuration.</p>
+<p>From a second terminal, confirm the model and context before timing
+anything.</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">base</span><span class="op">=</span>http://127.0.0.1:8144</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-fsS</span> <span class="st">&quot;</span><span class="va">$base</span><span class="st">/v1/models&quot;</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-fsS</span> <span class="st">&quot;</span><span class="va">$base</span><span class="st">/api/monitor/v1/snapshot&quot;</span> <span class="kw">|</span> <span class="ex">jq</span> <span class="st">&#39;.engine&#39;</span></span></code></pre></div>
+<p>Then connect an OpenAI-compatible client to
+<code>http://127.0.0.1:8144/v1</code> and choose <code>strata-27b</code>
+or <code>strata-flash-next</code> as the model ID. To run the client
+from another machine, forward the loopback port with SSH. Leave the API
+bound to loopback on the serving host.</p>
+<ol type="1">
+<li><strong>Measure prefill and decode separately.</strong> Use one
+stream and record prompt and output token counts, time to first token,
+and decode tok/s. Try short and long prompts at the same output cap.
+Keep the task, temperature, context and target fixed when comparing
+drafters.</li>
+<li><strong>Use real follow-ups.</strong> Paste a source file or design
+note into a conversation and include a fact you can verify. Ask two
+later questions that depend on it, in the same session. Then try a
+separate conversation and confirm the previous prefix was not reused.
+Check that the actual assistant answers are correct.</li>
+<li><strong>Inspect the counters.</strong> The monitor gives per-request
+prompt, cached, and output tokens. A fast second reply alone can come
+from a short answer or a warmed process. Pair the cache counter with
+first-token time and repeat the run.</li>
+<li><strong>Expand the test after it works.</strong> Try your usual
+reasoning mode and a real tool loop. If you add media, time job
+completion and the first successful chat reply after the mode switch.
+Use the same saved model identity on both sides of that check.</li>
+</ol>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-fsS</span> <span class="st">&quot;</span><span class="va">$base</span><span class="st">/api/monitor/v1/snapshot&quot;</span> <span class="kw">|</span> <span class="ex">jq</span> <span class="st">&#39;.requests[-1] | {</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="st">  prompt_tokens, prefill_cached_tokens, output_tokens,</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="st">  first_output_ms, decode_tokens_per_second</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="st">}&#39;</span></span></code></pre></div>
+<p>The most useful next comparison is a repeated turn from your own
+workload. It will tell you whether to spend your time on a better
+drafter, a working prompt cache, or a shorter restart.</p>
       </div>
     </article>
   </main>

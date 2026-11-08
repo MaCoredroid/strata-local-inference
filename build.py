@@ -27,6 +27,8 @@ body = subprocess.run(
     ["pandoc", "--from=gfm+raw_html", "--to=html5", "--shift-heading-level-by=1"],
     input=article, check=True, capture_output=True, text=True,
 ).stdout
+body = body.replace("<table>", '<div class="table-wrap" tabindex="0" role="region" aria-label="Article table"><table>')
+body = body.replace("</table>", "</table></div>")
 (SITE / "index.html").write_text(f"""<!doctype html>
 <html lang="en">
 <head>
@@ -39,14 +41,22 @@ body = subprocess.run(
 <body>
   <a class="skip-link" href="#article">Skip to article</a>
   <header class="masthead">
-    <div class="masthead-inner"><span class="wordmark">Strata</span><span class="series">Engineering notes</span></div>
+    <div class="masthead-inner">
+      <span class="wordmark">Strata</span>
+      <a class="series" href="https://macoredroid.github.io/collective-intelligence/">Collective Intelligence companion</a>
+    </div>
   </header>
   <main id="article">
     <article>
       <header class="hero">
-        <div class="eyebrow">Local inference</div>
+        <div class="eyebrow">Field notes · Local inference</div>
         <h1>{display_title}</h1>
-        <p class="deck">Two GPUs, two chat models, and one conversation that can request images or video.</p>
+        <p class="deck">An RTX 5090, a DGX Spark, and the difference between a faster model and a faster turn.</p>
+        <nav aria-label="In this article" class="jump-links">
+          <a href="#what-strata-owns">Architecture</a>
+          <a href="#what-the-experiments-changed">Results</a>
+          <a href="#try-the-serving-profiles-on-your-hardware">Run it locally</a>
+        </nav>
       </header>
       <div class="article-body">
 {body}      </div>
