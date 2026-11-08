@@ -270,6 +270,43 @@ class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="
 or <code>strata-flash-next</code> as the model ID. To run the client
 from another machine, forward the loopback port with SSH. Leave the API
 bound to loopback on the serving host.</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co"># On the client machine. Replace spark-host with your SSH host.</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="fu">ssh</span> <span class="at">-NT</span> <span class="at">-o</span> ExitOnForwardFailure=yes <span class="at">-L</span> 127.0.0.1:18145:127.0.0.1:8144 spark-host</span></code></pre></div>
+<p>For OpenCode 2, start with a separate config directory so you can try
+the provider without changing your existing defaults.</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="bu">export</span> <span class="va">XDG_CONFIG_HOME</span><span class="op">=</span><span class="st">&quot;</span><span class="va">$(</span><span class="fu">mktemp</span> <span class="at">-d</span><span class="va">)</span><span class="st">&quot;</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="fu">mkdir</span> <span class="at">-p</span> <span class="st">&quot;</span><span class="va">$XDG_CONFIG_HOME</span><span class="st">/opencode&quot;</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Save the JSON below as &quot;$XDG_CONFIG_HOME/opencode/opencode.json&quot;.</span></span></code></pre></div>
+<p>Use port 8144 when running on the same machine. For the 5090 recipe,
+use its forwarded port, set <code>modelID</code> to
+<code>strata-27b</code>, and set <code>context</code> to 204800.</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;$schema&quot;</span><span class="fu">:</span> <span class="st">&quot;https://opencode.ai/config.json&quot;</span><span class="fu">,</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;model&quot;</span><span class="fu">:</span> <span class="st">&quot;strata/local&quot;</span><span class="fu">,</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;providers&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;strata&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;name&quot;</span><span class="fu">:</span> <span class="st">&quot;Strata local&quot;</span><span class="fu">,</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;package&quot;</span><span class="fu">:</span> <span class="st">&quot;@opencode/ai/providers/openai-compatible&quot;</span><span class="fu">,</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;settings&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;baseURL&quot;</span><span class="fu">:</span> <span class="st">&quot;http://127.0.0.1:18145/v1&quot;</span> <span class="fu">},</span></span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;models&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;local&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>          <span class="dt">&quot;name&quot;</span><span class="fu">:</span> <span class="st">&quot;Local Qwen&quot;</span><span class="fu">,</span></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>          <span class="dt">&quot;modelID&quot;</span><span class="fu">:</span> <span class="st">&quot;strata-flash-next&quot;</span><span class="fu">,</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a>          <span class="dt">&quot;limit&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;context&quot;</span><span class="fu">:</span> <span class="dv">262144</span><span class="fu">,</span> <span class="dt">&quot;output&quot;</span><span class="fu">:</span> <span class="dv">32768</span> <span class="fu">},</span></span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a>          <span class="dt">&quot;capabilities&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;input&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;text&quot;</span><span class="ot">]</span><span class="fu">,</span> <span class="dt">&quot;output&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;text&quot;</span><span class="ot">]</span><span class="fu">,</span> <span class="dt">&quot;tools&quot;</span><span class="fu">:</span> <span class="kw">true</span> <span class="fu">},</span></span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a>          <span class="dt">&quot;compatibility&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;reasoningField&quot;</span><span class="fu">:</span> <span class="st">&quot;reasoning_content&quot;</span> <span class="fu">},</span></span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a>          <span class="dt">&quot;body&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;cache_prompt&quot;</span><span class="fu">:</span> <span class="kw">true</span> <span class="fu">}</span></span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a>        <span class="fu">}</span></span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a>      <span class="fu">}</span></span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a>    <span class="fu">}</span></span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a>  <span class="fu">}</span></span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="ex">opencode</span> run <span class="at">--standalone</span> <span class="at">--model</span> strata/local <span class="at">--title</span> <span class="st">&quot;Local check&quot;</span> <span class="dt">\</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>  <span class="st">&quot;What is 17 times 19? Answer with only the integer.&quot;</span></span></code></pre></div>
 <ol type="1">
 <li><strong>Measure prefill and decode separately.</strong> Use one
 stream and record prompt and output token counts, time to first token,
@@ -280,7 +317,11 @@ drafters.</li>
 note into a conversation and include a fact you can verify. Ask two
 later questions that depend on it, in the same session. Then try a
 separate conversation and confirm the previous prefix was not reused.
-Check that the actual assistant answers are correct.</li>
+For a controlled OpenCode CLI test, give the first
+<code>opencode run</code> an explicit <code>--title</code> and reuse its
+session ID for subsequent turns. The default title generator sends its
+own inference request and can confuse the timing comparison or displace
+a single-slot snapshot.</li>
 <li><strong>Inspect the counters.</strong> The monitor gives per-request
 prompt, cached, and output tokens. A fast second reply alone can come
 from a short answer or a warmed process. Pair the cache counter with
@@ -290,11 +331,11 @@ reasoning mode and a real tool loop. If you add media, time job
 completion and the first successful chat reply after the mode switch.
 Use the same saved model identity on both sides of that check.</li>
 </ol>
-<div class="sourceCode" id="cb3"><pre
-class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-fsS</span> <span class="st">&quot;</span><span class="va">$base</span><span class="st">/api/monitor/v1/snapshot&quot;</span> <span class="kw">|</span> <span class="ex">jq</span> <span class="st">&#39;.requests[-1] | {</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="st">  prompt_tokens, prefill_cached_tokens, output_tokens,</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="st">  first_output_ms, decode_tokens_per_second</span></span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="st">}&#39;</span></span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-fsS</span> <span class="st">&quot;</span><span class="va">$base</span><span class="st">/api/monitor/v1/snapshot&quot;</span> <span class="kw">|</span> <span class="ex">jq</span> <span class="st">&#39;.requests[-1] | {</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="st">  prompt_tokens, prefill_cached_tokens, output_tokens,</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a><span class="st">  first_output_ms, decode_tokens_per_second</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="st">}&#39;</span></span></code></pre></div>
 <p>The most useful next comparison is a repeated turn from your own
 workload. It will tell you whether to spend your time on a better
 drafter, a working prompt cache, or a shorter restart.</p>

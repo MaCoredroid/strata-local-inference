@@ -90,8 +90,52 @@ curl -fsS "$base/api/monitor/v1/snapshot" | jq '.engine'
 
 Then connect an OpenAI-compatible client to `http://127.0.0.1:8144/v1` and choose `strata-27b` or `strata-flash-next` as the model ID. To run the client from another machine, forward the loopback port with SSH. Leave the API bound to loopback on the serving host.
 
+```bash
+# On the client machine. Replace spark-host with your SSH host.
+ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18145:127.0.0.1:8144 spark-host
+```
+
+For OpenCode 2, start with a separate config directory so you can try the provider without changing your existing defaults.
+
+```bash
+export XDG_CONFIG_HOME="$(mktemp -d)"
+mkdir -p "$XDG_CONFIG_HOME/opencode"
+# Save the JSON below as "$XDG_CONFIG_HOME/opencode/opencode.json".
+```
+
+Use port 8144 when running on the same machine. For the 5090 recipe, use its forwarded port, set `modelID` to `strata-27b`, and set `context` to 204800.
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "strata/local",
+  "providers": {
+    "strata": {
+      "name": "Strata local",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": { "baseURL": "http://127.0.0.1:18145/v1" },
+      "models": {
+        "local": {
+          "name": "Local Qwen",
+          "modelID": "strata-flash-next",
+          "limit": { "context": 262144, "output": 32768 },
+          "capabilities": { "input": ["text"], "output": ["text"], "tools": true },
+          "compatibility": { "reasoningField": "reasoning_content" },
+          "body": { "cache_prompt": true }
+        }
+      }
+    }
+  }
+}
+```
+
+```bash
+opencode run --standalone --model strata/local --title "Local check" \
+  "What is 17 times 19? Answer with only the integer."
+```
+
 1. **Measure prefill and decode separately.** Use one stream and record prompt and output token counts, time to first token, and decode tok/s. Try short and long prompts at the same output cap. Keep the task, temperature, context and target fixed when comparing drafters.
-2. **Use real follow-ups.** Paste a source file or design note into a conversation and include a fact you can verify. Ask two later questions that depend on it, in the same session. Then try a separate conversation and confirm the previous prefix was not reused. Check that the actual assistant answers are correct.
+2. **Use real follow-ups.** Paste a source file or design note into a conversation and include a fact you can verify. Ask two later questions that depend on it, in the same session. Then try a separate conversation and confirm the previous prefix was not reused. For a controlled OpenCode CLI test, give the first `opencode run` an explicit `--title` and reuse its session ID for subsequent turns. The default title generator sends its own inference request and can confuse the timing comparison or displace a single-slot snapshot.
 3. **Inspect the counters.** The monitor gives per-request prompt, cached, and output tokens. A fast second reply alone can come from a short answer or a warmed process. Pair the cache counter with first-token time and repeat the run.
 4. **Expand the test after it works.** Try your usual reasoning mode and a real tool loop. If you add media, time job completion and the first successful chat reply after the mode switch. Use the same saved model identity on both sides of that check.
 
