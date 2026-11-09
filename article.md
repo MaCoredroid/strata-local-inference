@@ -1,6 +1,6 @@
 # What makes a local agent fast enough to use?
 
-The largest speedup in Strata changed how long we waited for a reply to **start**. On Spark, two follow-ups that shared almost 16,000 tokens went from **8.21 seconds to 0.23 seconds** to first token when we made prefix reuse work. The same patch barely moved decode speed. On the 5090, DFlash2 did almost the reverse. It raised median decode from **82 to 292 tokens per second** in two matched coding probes while cold prompt processing still took seconds.
+The largest speedup in Strata changed how long we waited for a reply to **start**. On Spark, median time to first token across four OpenCode follow-ups fell from **5.60 seconds to 0.52 seconds** when we made prefix reuse work. On the 5090, DFlash2 shortened a different part of the turn. It raised median decode from **82 to 292 tokens per second** in two matched coding probes while cold prompt processing still took seconds.
 
 That difference matters because the unit of work is a turn in an ongoing conversation. A turn can reopen a large repository context, run a tool, or ask another machine to render an asset. A faster decoder only shortens part of that path.
 
@@ -45,9 +45,15 @@ On **Spark**, Flash-Next routes each token to a subset of its experts. Unified m
 
 **2. A cache setting needs a counter.** Stock tqLLM 1.4.4 accepted the prompt-cache option on Spark, but its Flash-Next engine required more than one slot before reusing prompt state. The two stock follow-ups reused zero tokens. In a combined patch trial, Spark reused about **99.5%** of each 16K prefix. Median first-token latency fell from **8.21 s to 0.23 s**. The identical cold prompt went from **8.22 s to 8.81 s**. The fast path depends on an actual shared prefix and a retained snapshot. After a model switch or restart, the first turn has to populate the cache again. [tqLLM 1.4.4 cache implementation](https://github.com/turbo-tan/tqllm/blob/v1.4.4/src/models/qwen/qwen4exp/fn_engine.hpp#L68-L75)
 
+Flash-Next mixes sparse attention with recurrent layers. To resume, the engine restores the recurrent state, convolution history, and per-layer embedding state from a snapshot near the end of the previous prompt. It rewinds the attention and drafter caches to that position, then processes the new suffix. OpenCode can reconstruct the conversation from disk, but only the running model process holds this snapshot. In one slot, the next unrelated request can replace it. [Snapshot and restore code](https://github.com/turbo-tan/tqllm/blob/v1.4.4/src/models/qwen/qwen4exp/fn_engine_prefill.cpp)
+
+I checked whether that improvement survived an actual harness. Two three-turn OpenCode chats used Python standard-library source and then asked questions that depended on the earlier turn. Both profiles answered all six checks correctly. The patched server reused **8,577–11,846 tokens** per follow-up and zero on each fresh chat. The cold first turns got slower, from **6.27 to 8.12 s** and **4.88 to 5.27 s**. I named the test sessions explicitly and disabled tools for this comparison. OpenCode's automatic title generation otherwise sends its own model request, which makes a single-slot measurement hard to interpret.
+
 **3. Greedy output is a numerical test.** The combined patch initially changed four of six long greedy outputs. When we isolated the changes, the CUDA graph fix matched stock on both 1,536-token samples. The cache change alone diverged at tokens **38** and **27** with zero cache hits. The second split occurred below the sparse-attention threshold. Creating the snapshot adds a prefill chunk boundary, which can change floating-point rounding. A close token choice can then flip, and the next prediction sees a different history. We measured the first divergent token, while the score margin between the two choices remains unknown. This is why we check task outcomes on actual follow-up turns as well as exact token matches on controlled runs.
 
 **4. Draft tuning helped on Spark, but the gain was smaller.** With the cache and graph patches disabled, moving the MTP confidence cutoff from 0.90 to 0.80 moved **68.3 → 71.5 tok/s** on one short prompt and **65.6 → 66.6 tok/s** on one 15.6K prompt. Both holdout outputs matched stock across all 1,536 tokens. The larger published **122 tok/s** result uses tqLLM's own mixed-quantization checkpoint. That gives us a lead for a different profile, while the numbers above isolate a setting on our existing abliterated weights. [tqLLM 1.4.2 release measurements](https://tqllm.com/releases)
+
+A follow-on decode experiment could keep the same target shards and try DFlash2 for Flash-Next in llama.cpp. The recent support change averages Flash-Next's four residual streams before exposing the hidden states to the drafter. A separate Swift 1.5 test on an M5 Max reported **+12% on code and −2% on prose** at a 163,840-token configured context using a different quantization. On our hardware, I would run the same target and prompts with native MTP and DFlash2 in the new engine, then compare the winner against the current tqLLM setup. [llama.cpp feature capture change](https://github.com/ggml-org/llama.cpp/pull/30927) · [Swift 1.5 drafter measurements](https://huggingface.co/nazeshinjite/Qwen3.8-Flash-Next-DFlash2-GGUF#fine-tunes-of-the-same-base-drafter-unchanged)
 
 | Serving profile | Coding decode | Reasoning decode | First token on a cold 33.5K prompt |
 | --- | ---: | ---: | ---: |
@@ -78,7 +84,7 @@ bash recipes/serve.sh 5090
 bash recipes/serve.sh spark
 ```
 
-The [serving script](recipes/serve.sh) pins each public asset to a revision and verifies its SHA-256 before launch. It writes the Spark manifest and binds the API to loopback. Set `STRATA_MODEL_DIR` to an SSD directory, add `--download-only` to stage weights without starting a GPU process, and set `STRATA_PORT` if 8144 is in use. If the profile does not fit your card, start with a model or context that fits and record that as a separate configuration.
+The [serving script](recipes/serve.sh) pins each public asset to a revision and verifies its SHA-256 before launch. It writes the Spark manifest and binds the API to loopback. The public recipe starts the stock release, so a stock single-slot Spark run is the baseline for the cache exercise below. Set `STRATA_MODEL_DIR` to an SSD directory, add `--download-only` to stage weights without starting a GPU process, and set `STRATA_PORT` if 8144 is in use. If the profile does not fit your card, start with a model or context that fits and record that as a separate configuration.
 
 From a second terminal, confirm the model and context before timing anything.
 
@@ -145,5 +151,23 @@ curl -fsS "$base/api/monitor/v1/snapshot" | jq '.requests[-1] | {
   first_output_ms, decode_tokens_per_second
 }'
 ```
+
+## Reproduce the Spark cache comparison
+
+The [optional Spark patch](recipes/tqllm-spark/followup.patch) enables single-slot reuse on unified memory and sets the adaptive MTP cutoff to 0.80. It grows the KV allocation in 16,384-token increments as requests need room, with the same 262,144-token limit. The CUDA graph experiment is separate. The patched build used CUDA Toolkit 13.0 on ARM64 GB10. From the guide's checkout, with a C++ compiler, CMake, and the CUDA toolkit installed:
+
+```bash
+git clone --branch v1.4.4 https://github.com/turbo-tan/tqllm.git tqllm-src
+git -C tqllm-src apply --check "$PWD/recipes/tqllm-spark/followup.patch"
+git -C tqllm-src apply "$PWD/recipes/tqllm-spark/followup.patch"
+cmake -S tqllm-src -B tqllm-src/build -DCMAKE_BUILD_TYPE=Release \
+  -DTQLLM_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121
+cmake --build tqllm-src/build --target tqserve --parallel 6
+
+# Stop the stock test server first. This reuses the same model directory.
+STRATA_TQSERVE_BINARY="$PWD/tqllm-src/build/tqserve" bash recipes/serve.sh spark
+```
+
+Repeat the same turns with the same model directory, one slot, and the same configured context. Verify that fresh chats start with zero cached tokens. Compare cold turns and follow-ups separately, and check whether the answers still satisfy the task. To rerun stock, stop the test server and launch the recipe without the binary override.
 
 The most useful next comparison is a repeated turn from your own workload. It will tell you whether to spend your time on a better drafter, a working prompt cache, or a shorter restart.

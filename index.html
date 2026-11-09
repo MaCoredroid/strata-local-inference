@@ -29,13 +29,12 @@
       </header>
       <div class="article-body">
 <p>The largest speedup in Strata changed how long we waited for a reply
-to <strong>start</strong>. On Spark, two follow-ups that shared almost
-16,000 tokens went from <strong>8.21 seconds to 0.23 seconds</strong> to
-first token when we made prefix reuse work. The same patch barely moved
-decode speed. On the 5090, DFlash2 did almost the reverse. It raised
-median decode from <strong>82 to 292 tokens per second</strong> in two
-matched coding probes while cold prompt processing still took
-seconds.</p>
+to <strong>start</strong>. On Spark, median time to first token across
+four OpenCode follow-ups fell from <strong>5.60 seconds to 0.52
+seconds</strong> when we made prefix reuse work. On the 5090, DFlash2
+shortened a different part of the turn. It raised median decode from
+<strong>82 to 292 tokens per second</strong> in two matched coding
+probes while cold prompt processing still took seconds.</p>
 <p>That difference matters because the unit of work is a turn in an
 ongoing conversation. A turn can reopen a large repository context, run
 a tool, or ask another machine to render an asset. A faster decoder only
@@ -155,6 +154,25 @@ After a model switch or restart, the first turn has to populate the
 cache again. <a
 href="https://github.com/turbo-tan/tqllm/blob/v1.4.4/src/models/qwen/qwen4exp/fn_engine.hpp#L68-L75">tqLLM
 1.4.4 cache implementation</a></p>
+<p>Flash-Next mixes sparse attention with recurrent layers. To resume,
+the engine restores the recurrent state, convolution history, and
+per-layer embedding state from a snapshot near the end of the previous
+prompt. It rewinds the attention and drafter caches to that position,
+then processes the new suffix. OpenCode can reconstruct the conversation
+from disk, but only the running model process holds this snapshot. In
+one slot, the next unrelated request can replace it. <a
+href="https://github.com/turbo-tan/tqllm/blob/v1.4.4/src/models/qwen/qwen4exp/fn_engine_prefill.cpp">Snapshot
+and restore code</a></p>
+<p>I checked whether that improvement survived an actual harness. Two
+three-turn OpenCode chats used Python standard-library source and then
+asked questions that depended on the earlier turn. Both profiles
+answered all six checks correctly. The patched server reused
+<strong>8,577–11,846 tokens</strong> per follow-up and zero on each
+fresh chat. The cold first turns got slower, from <strong>6.27 to 8.12
+s</strong> and <strong>4.88 to 5.27 s</strong>. I named the test
+sessions explicitly and disabled tools for this comparison. OpenCode's
+automatic title generation otherwise sends its own model request, which
+makes a single-slot measurement hard to interpret.</p>
 <p><strong>3. Greedy output is a numerical test.</strong> The combined
 patch initially changed four of six long greedy outputs. When we
 isolated the changes, the CUDA graph fix matched stock on both
@@ -178,6 +196,18 @@ lead for a different profile, while the numbers above isolate a setting
 on our existing abliterated weights. <a
 href="https://tqllm.com/releases">tqLLM 1.4.2 release
 measurements</a></p>
+<p>A follow-on decode experiment could keep the same target shards and
+try DFlash2 for Flash-Next in llama.cpp. The recent support change
+averages Flash-Next's four residual streams before exposing the hidden
+states to the drafter. A separate Swift 1.5 test on an M5 Max reported
+<strong>+12% on code and −2% on prose</strong> at a 163,840-token
+configured context using a different quantization. On our hardware, I
+would run the same target and prompts with native MTP and DFlash2 in the
+new engine, then compare the winner against the current tqLLM setup. <a
+href="https://github.com/ggml-org/llama.cpp/pull/30927">llama.cpp
+feature capture change</a> · <a
+href="https://huggingface.co/nazeshinjite/Qwen3.8-Flash-Next-DFlash2-GGUF#fine-tunes-of-the-same-base-drafter-unchanged">Swift
+1.5 drafter measurements</a></p>
 <div class="table-wrap" tabindex="0" role="region" aria-label="Article table"><table>
 <thead>
 <tr>
@@ -253,12 +283,13 @@ class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="
 <span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="fu">bash</span> recipes/serve.sh spark</span></code></pre></div>
 <p>The <a href="recipes/serve.sh">serving script</a> pins each public
 asset to a revision and verifies its SHA-256 before launch. It writes
-the Spark manifest and binds the API to loopback. Set
-<code>STRATA_MODEL_DIR</code> to an SSD directory, add
-<code>--download-only</code> to stage weights without starting a GPU
-process, and set <code>STRATA_PORT</code> if 8144 is in use. If the
-profile does not fit your card, start with a model or context that fits
-and record that as a separate configuration.</p>
+the Spark manifest and binds the API to loopback. The public recipe
+starts the stock release, so a stock single-slot Spark run is the
+baseline for the cache exercise below. Set <code>STRATA_MODEL_DIR</code>
+to an SSD directory, add <code>--download-only</code> to stage weights
+without starting a GPU process, and set <code>STRATA_PORT</code> if 8144
+is in use. If the profile does not fit your card, start with a model or
+context that fits and record that as a separate configuration.</p>
 <p>From a second terminal, confirm the model and context before timing
 anything.</p>
 <div class="sourceCode" id="cb2"><pre
@@ -336,6 +367,30 @@ class="sourceCode bash"><code class="sourceCode bash"><span id="cb7-1"><a href="
 <span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="st">  prompt_tokens, prefill_cached_tokens, output_tokens,</span></span>
 <span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a><span class="st">  first_output_ms, decode_tokens_per_second</span></span>
 <span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="st">}&#39;</span></span></code></pre></div>
+<h3 id="reproduce-the-spark-cache-comparison">Reproduce the Spark cache
+comparison</h3>
+<p>The <a href="recipes/tqllm-spark/followup.patch">optional Spark
+patch</a> enables single-slot reuse on unified memory and sets the
+adaptive MTP cutoff to 0.80. It grows the KV allocation in 16,384-token
+increments as requests need room, with the same 262,144-token limit. The
+CUDA graph experiment is separate. The patched build used CUDA Toolkit
+13.0 on ARM64 GB10. From the guide's checkout, with a C++ compiler,
+CMake, and the CUDA toolkit installed:</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> clone <span class="at">--branch</span> v1.4.4 https://github.com/turbo-tan/tqllm.git tqllm-src</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> <span class="at">-C</span> tqllm-src apply <span class="at">--check</span> <span class="st">&quot;</span><span class="va">$PWD</span><span class="st">/recipes/tqllm-spark/followup.patch&quot;</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> <span class="at">-C</span> tqllm-src apply <span class="st">&quot;</span><span class="va">$PWD</span><span class="st">/recipes/tqllm-spark/followup.patch&quot;</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a><span class="fu">cmake</span> <span class="at">-S</span> tqllm-src <span class="at">-B</span> tqllm-src/build <span class="at">-DCMAKE_BUILD_TYPE</span><span class="op">=</span>Release <span class="dt">\</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">-DTQLLM_CUDA</span><span class="op">=</span>ON <span class="at">-DCMAKE_CUDA_ARCHITECTURES</span><span class="op">=</span>121</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="fu">cmake</span> <span class="at">--build</span> tqllm-src/build <span class="at">--target</span> tqserve <span class="at">--parallel</span> 6</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a><span class="co"># Stop the stock test server first. This reuses the same model directory.</span></span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a><span class="va">STRATA_TQSERVE_BINARY</span><span class="op">=</span><span class="st">&quot;</span><span class="va">$PWD</span><span class="st">/tqllm-src/build/tqserve&quot;</span> <span class="fu">bash</span> recipes/serve.sh spark</span></code></pre></div>
+<p>Repeat the same turns with the same model directory, one slot, and
+the same configured context. Verify that fresh chats start with zero
+cached tokens. Compare cold turns and follow-ups separately, and check
+whether the answers still satisfy the task. To rerun stock, stop the
+test server and launch the recipe without the binary override.</p>
 <p>The most useful next comparison is a repeated turn from your own
 workload. It will tell you whether to spend your time on a better
 drafter, a working prompt cache, or a shorter restart.</p>
